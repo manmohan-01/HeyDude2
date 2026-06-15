@@ -151,11 +151,26 @@ function listenFriendRequests() {
 
   requestsRef.on("value", snapshot => {
     requestList.innerHTML = "";
-    const requests = snapshot.val();
-    const badge    = document.getElementById("req-badge");
+    const requests   = snapshot.val();
+    const badge      = document.getElementById("req-badge");
+    const railBadge  = document.getElementById("rail-req-badge");
+    const emptyState = document.getElementById("request-empty");
+
+    const setBadges = (count) => {
+      [badge, railBadge].forEach(b => {
+        if (!b) return;
+        if (count === 0) {
+          b.classList.add("hidden");
+        } else {
+          b.textContent = count;
+          b.classList.remove("hidden");
+        }
+      });
+    };
 
     if (!requests) {
-      badge.classList.add("hidden");
+      setBadges(0);
+      if (emptyState) emptyState.classList.remove("hidden");
       return;
     }
 
@@ -163,12 +178,8 @@ function listenFriendRequests() {
       r => r.to === currentUser.uid && r.status === "pending"
     );
 
-    if (pending.length === 0) {
-      badge.classList.add("hidden");
-    } else {
-      badge.textContent = pending.length;
-      badge.classList.remove("hidden");
-    }
+    setBadges(pending.length);
+    if (emptyState) emptyState.classList.toggle("hidden", pending.length > 0);
 
     pending.forEach(renderRequest);
   });
