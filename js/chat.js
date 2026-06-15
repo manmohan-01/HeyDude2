@@ -5,6 +5,7 @@
 
 let activeChatId  = null;
 let activeUserId  = null;
+let activeGroupId = null;
 let typingTimeout = null;
 let replyingTo    = null;
 let contextTarget = null;
@@ -36,7 +37,11 @@ function loadChats() {
 
   chatsRef.on("value", async snapshot => {
     const chats = snapshot.val();
-    if (!chats) { chatList.innerHTML = ""; return; }
+    if (!chats) {
+      chatList.innerHTML = "";
+      if (typeof updateChatListEmptyState === "function") updateChatListEmptyState();
+      return;
+    }
 
     // Build set of current chat IDs
     const currentIds = new Set();
@@ -60,6 +65,8 @@ function loadChats() {
       const id = el.id.replace("chat-item-", "");
       if (!currentIds.has(id)) el.remove();
     });
+
+    if (typeof updateChatListEmptyState === "function") updateChatListEmptyState();
   });
 }
 
@@ -71,6 +78,9 @@ function renderChatItem(chatId, friend) {
   const div      = document.createElement("div");
   div.className  = "chat-item";
   div.id         = `chat-item-${chatId}`;
+  div.dataset.chatId   = chatId;
+  div.dataset.friendUid = friend.uid;
+  div.dataset.friendName = friend.username;
   div.onclick    = () => openChat(chatId, friend);
 
   div.innerHTML = `
@@ -87,7 +97,46 @@ function renderChatItem(chatId, friend) {
       <span id="time-${chatId}" class="chat-time"></span>
       <div class="online-dot" id="dot-${friend.uid}" style="opacity:${friend.online ? 1 : 0.25}"></div>
     </div>
+    <button class="chat-item-menu-btn" title="More options" aria-label="More options">
+      <svg><use href="#icon-more-vertical"/></svg>
+    </button>
   `;
+
+  // Kebab button — open context menu without triggering openChat
+  const menuBtn = div.querySelector(".chat-item-menu-btn");
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    showChatContextMenu(e.clientX, e.clientY, chatId, friend);
+  });
+
+  // Right-click anywhere on the row
+  div.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showChatContextMenu(e.clientX, e.clientY, chatId, friend);
+  });
+
+  // Long-press for touch devices
+  let chatPressTimer;
+  let chatLongPressFired = false;
+  div.addEventListener("touchstart", (e) => {
+    chatLongPressFired = false;
+    chatPressTimer = setTimeout(() => {
+      chatLongPressFired = true;
+      const t = e.touches[0];
+      showChatContextMenu(t.clientX, t.clientY, chatId, friend);
+    }, 550);
+  }, { passive: true });
+  div.addEventListener("touchend", (e) => {
+    clearTimeout(chatPressTimer);
+    if (chatLongPressFired) {
+      e.preventDefault();
+      const swallowClick = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener("click", swallowClick, { capture: true, once: true });
+      setTimeout(() => document.removeEventListener("click", swallowClick, { capture: true }), 0);
+      chatLongPressFired = false;
+    }
+  });
+  div.addEventListener("touchmove", () => { clearTimeout(chatPressTimer); chatLongPressFired = false; });
 
   chatList.appendChild(div);
   listenLastMessage(chatId);
@@ -98,6 +147,130 @@ function renderChatItem(chatId, friend) {
     const dot = document.getElementById(`dot-${friend.uid}`);
     if (dot && u) dot.style.opacity = u.online ? "1" : "0.25";
   });
+}
+
+// =====================================
+// CHAT ITEM CONTEXT MENU (delete friend / chat)
+// =====================================
+
+let chatContextTarget = null; // { chatId, friend }
+
+function showChatContextMenu(x, y, chatId, friend) {
+  chatContextTarget = { chatId, friend };
+
+  const menu = document.getElementById("chat-context-menu");
+  const menuW = 190, menuH = 100;
+  menu.style.left = `${Math.min(x, window.innerWidth  - menuW - 8)}px`;
+  menu.style.top  = `${Math.min(y, window.innerHeight - menuH - 8)}px`;
+  menu.classList.remove("hidden");
+}
+
+function hideChatContextMenu() {
+  document.getElementById("chat-context-menu").classList.add("hidden");
+  chatContextTarget = null;
+}
+
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("chat-context-menu");
+  if (!menu.contains(e.target)) hideChatContextMenu();
+});
+
+document.getElementById("chat-context-menu").addEventListener("click", async (e) => {
+  const action = e.target.closest("button")?.dataset.action;
+  if (!action || !chatContextTarget) return;
+
+  if (action === "delete-friend") {
+    confirmDeleteFriend(chatContextTarget.chatId, chatContextTarget.friend);
+  }
+
+  hideChatContextMenu();
+});
+
+// =====================================
+// DELETE FRIEND / CHAT
+// =====================================
+
+function confirmDeleteFriend(chatId, friend) {
+  showConfirmDialog({
+    title: "Remove friend?",
+    message: `This will remove ${escapeHTML(friend.username)} from your friend list and delete your conversation. This can't be undone.`,
+    confirmLabel: "Remove",
+    danger: true,
+    onConfirm: () => deleteFriendChat(chatId, friend)
+  });
+}
+
+async function deleteFriendChat(chatId, friend) {
+  if (!currentUser) return;
+
+  try {
+    // If this chat is currently open, close it first
+    if (activeChatId === chatId) {
+      closeActiveChat();
+    }
+
+    // Remove all data associated with this chat
+    await Promise.all([
+      chatsRef.child(chatId).remove(),
+      messagesRef.child(chatId).remove(),
+      typingRef.child(chatId).remove()
+    ]);
+
+    // Clean up any friend requests between these two users (either direction)
+    const reqSnap = await requestsRef.once("value");
+    const requests = reqSnap.val();
+    if (requests) {
+      const toRemove = Object.entries(requests).filter(([, r]) =>
+        (r.from === currentUser.uid && r.to === friend.uid) ||
+        (r.from === friend.uid && r.to === currentUser.uid)
+      );
+      await Promise.all(toRemove.map(([id]) => requestsRef.child(id).remove()));
+    }
+
+    // Remove the chat item from the UI immediately (loadChats listener
+    // will also reconcile, but this feels instant)
+    const item = document.getElementById(`chat-item-${chatId}`);
+    if (item) {
+      item.style.transition = "opacity 0.18s, transform 0.18s";
+      item.style.opacity = "0";
+      item.style.transform = "translateX(-12px)";
+      setTimeout(() => {
+        item.remove();
+        if (typeof updateChatListEmptyState === "function") updateChatListEmptyState();
+      }, 180);
+    }
+
+    showToast(`Removed ${friend.username}`);
+  } catch (err) {
+    console.error("Delete friend error:", err);
+    showToast("Couldn't remove friend — try again");
+  }
+}
+
+// =====================================
+// CLOSE ACTIVE CHAT (when it's deleted while open)
+// =====================================
+
+function closeActiveChat() {
+  if (activeChatId) {
+    messagesRef.child(activeChatId).off();
+    typingRef.child(activeChatId).off();
+    Object.values(reactionListeners).forEach(off => off());
+    for (const k in reactionListeners) delete reactionListeners[k];
+  }
+
+  activeChatId  = null;
+  activeUserId  = null;
+  activeGroupId = null;
+  renderedMsgIds.clear();
+  lastRenderedDate = null;
+
+  welcomeScreen.classList.remove("hidden");
+  chatContainer.classList.add("hidden");
+
+  if (window.innerWidth <= 768) {
+    document.querySelector(".chat-panel").classList.remove("mobile-open");
+  }
 }
 
 // =====================================
@@ -163,6 +336,15 @@ function openChat(chatId, friend) {
   document.getElementById("chat-name").textContent        = friend.username;
   document.getElementById("chat-avatar").textContent      = getInitial(friend.username);
   document.getElementById("chat-avatar").style.background = avatarColor(friend.username);
+  document.getElementById("chat-avatar").style.borderRadius = "";
+
+  // Reset group-specific header state
+  activeGroupId = null;
+  document.getElementById("group-members-btn").classList.add("hidden");
+  document.getElementById("call-btn").classList.remove("hidden");
+  document.getElementById("video-btn").classList.remove("hidden");
+  const dot = document.getElementById("chat-online-dot");
+  if (dot) dot.style.display = "";
 
   updateUserStatus(friend.uid);
   listenMessages(chatId);
@@ -264,6 +446,15 @@ function buildMessageNode(message) {
   wrap.id        = `msg-wrap-${message.id}`;
   wrap.style.willChange = "transform, opacity";
 
+  // Sender name (group chats only, received messages)
+  if (!mine && message.senderName && activeChatId?.startsWith("group_")) {
+    const nameEl = document.createElement("div");
+    nameEl.className = "group-sender-name";
+    nameEl.textContent = message.senderName;
+    nameEl.style.color = avatarColor(message.senderName);
+    wrap.appendChild(nameEl);
+  }
+
   // Reply context
   if (message.replyTo) {
     const rc       = document.createElement("div");
@@ -338,9 +529,27 @@ function buildMessageNode(message) {
   // Context menu
   bubble.addEventListener("contextmenu", (e) => { e.preventDefault(); showContextMenu(e.clientX, e.clientY, message); });
   let pressTimer;
-  bubble.addEventListener("touchstart", (e) => { pressTimer = setTimeout(() => showContextMenu(e.touches[0].clientX, e.touches[0].clientY, message), 600); }, { passive: true });
-  bubble.addEventListener("touchend",   () => clearTimeout(pressTimer));
-  bubble.addEventListener("touchmove",  () => clearTimeout(pressTimer));
+  let longPressFired = false;
+  bubble.addEventListener("touchstart", (e) => {
+    longPressFired = false;
+    pressTimer = setTimeout(() => {
+      longPressFired = true;
+      showContextMenu(e.touches[0].clientX, e.touches[0].clientY, message);
+    }, 600);
+  }, { passive: true });
+  bubble.addEventListener("touchend", (e) => {
+    clearTimeout(pressTimer);
+    if (longPressFired) {
+      // Swallow the synthetic click that follows this touch so it
+      // doesn't immediately close the menu we just opened.
+      e.preventDefault();
+      const swallowClick = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener("click", swallowClick, { capture: true, once: true });
+      setTimeout(() => document.removeEventListener("click", swallowClick, { capture: true }), 0);
+      longPressFired = false;
+    }
+  });
+  bubble.addEventListener("touchmove",  () => { clearTimeout(pressTimer); longPressFired = false; });
 
   wrap.appendChild(bubble);
 
@@ -437,8 +646,10 @@ function hideContextMenu() { contextMenu.classList.add("hidden"); contextTarget 
 
 document.addEventListener("click", (e) => {
   if (!contextMenu.contains(e.target))   hideContextMenu();
-  if (!reactionPopup.contains(e.target) && !e.target.closest('[data-action="react"]'))
+  if (!reactionPopup.contains(e.target) && !e.target.closest('[data-action="react"]')) {
     reactionPopup.classList.add("hidden");
+    document.getElementById("reaction-full-picker")?.classList.add("hidden");
+  }
 });
 
 contextMenu.addEventListener("click", async (e) => {
@@ -451,11 +662,7 @@ contextMenu.addEventListener("click", async (e) => {
     const txt = contextTarget.text || "";
     navigator.clipboard?.writeText(txt).then(() => showToast("Copied!"));
   } else if (action === "react") {
-    const rect = contextMenu.getBoundingClientRect();
-    reactionPopup.style.left = `${rect.left}px`;
-    reactionPopup.style.top  = `${Math.max(8, rect.top - 60)}px`;
-    reactionPopup.classList.remove("hidden");
-    reactionPopup.dataset.msgId = contextTarget.id;
+    showReactionPopup(contextTarget.id);
   } else if (action === "delete") {
     await deleteMessage(contextTarget);
   }
@@ -468,13 +675,158 @@ reactionPopup.addEventListener("click", async (e) => {
   if (!btn) return;
   const emoji = btn.dataset.emoji;
   const msgId = reactionPopup.dataset.msgId;
-  if (emoji && msgId) await toggleReaction(msgId, emoji);
+  if (emoji && msgId) {
+    await toggleReaction(msgId, emoji);
+    addRecentReaction(emoji);
+  }
   reactionPopup.classList.add("hidden");
+  document.getElementById("reaction-full-picker").classList.add("hidden");
+});
+
+// =====================================
+// REACTION POPUP — smart positioning + full picker
+// =====================================
+
+const REACTION_EMOJI_DATA = {
+  smileys: ["😀","😃","😄","😁","😆","😅","🤣","😂","🙂","🙃","😉","😊","😇","🥰","😍","🤩","😘","😗","😋","😛","😜","🤪","😝","🤑","🤗","🤭","🤔","😐","😑","😶","😏","😒","🙄","😬","😌","😔","😪","😴","😷","🤒","🤕","🤢","🤮","🤧","🥵","🥶","🥴","😵","🤯","🥳","😎","🤓","🧐","😕","😟","🙁","😮","😯","😲","😳","🥺","😦","😧","😨","😰","😥","😢","😭","😱","😖","😣","😞","😓","😩","😫","🥱","😤","😡","😠","🤬","😈","👿","💀","💩","🤡"],
+  people:  ["👋","🤚","🖐️","✋","🖖","👌","✌️","🤞","👈","👉","👆","👇","☝️","👍","👎","✊","👊","🤛","🤜","👏","🙌","🤝","🙏","💪","🫀","🧠","👀","👅","👶","🧒","👦","👧","🧑","👱","👨","👩","🧓","👴","👵","🙍","🙎","🙅","🙆","💁","🙋","🙇","🤦","🤷","🧙","🧝","🧜","🧚","👼","🎅","🦸","🦹"],
+  nature:  ["🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵","🐔","🐧","🐦","🐤","🦆","🦅","🦉","🦇","🐺","🐗","🐴","🦄","🐝","🐛","🦋","🐌","🐞","🐜","🐢","🐍","🦎","🐙","🦈","🐬","🐳","🦒","🐘","🦛","🦏","🌸","🌺","🌻","🌹","🌷","🌼","🌿","🍀","🌴","🌲","🌋","🌍","🌈","⭐","🌟","⚡","🔥","💧","🌊"],
+  food:    ["🍎","🍊","🍋","🍇","🍓","🫐","🍑","🍒","🥭","🍍","🥥","🥝","🍅","🥑","🌽","🍠","🥐","🍞","🧀","🥚","🍳","🥞","🥓","🍔","🍟","🍕","🌮","🌯","🥗","🍝","🍜","🍲","🍛","🍣","🍱","🍤","🍙","🍚","🧁","🍰","🎂","🍭","🍬","🍫","🍿","🍩","🍪","☕","🍵","🧃","🥤","🧋","🍺","🍻","🥂","🍷","🍸","🥃"],
+  objects: ["⌚","📱","💻","⌨️","🖥️","📷","📺","📻","💡","🔦","🕯️","💸","💳","💎","🔧","🔨","🔑","🔐","🔒","🎁","🎀","🎊","🎉","🎈","🎭","🎨","🎯","🎱","🎮","🎲","🎸","🎹","🎺","🎻","🥁","🎤","🎧","📚","📖","📝","✏️","🖊️","📌","📍","✂️","🗂️","🗓️","📅","🔍","🔎","🔬","🔭","💊","🩺","🧲","🪄","🏆","🥇","🥈","🥉","🎖️"],
+  symbols: ["❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❤️‍🔥","💕","💞","💓","💗","💖","💘","💝","✅","❌","⭕","🛑","⚠️","💯","🔞","🆕","🆒","🆓","🔴","🟠","🟡","🟢","🔵","🟣","⚫","⚪","🔶","🔷","🔸","🔹","🔺","🔻","💠","🔘","🔲","🔳","▶️","⏩","⏪","⏫","⏬","⏹️","⏺️","🎵","🎶","🔔","🔕","📣","📢","🔊","🔉","🔈","🔇"]
+};
+
+let recentReactions = JSON.parse(localStorage.getItem("hd-recent-reactions") || '["❤️","😂","😮","😢","👍","🔥","🎉"]');
+
+function addRecentReaction(emoji) {
+  recentReactions = [emoji, ...recentReactions.filter(e => e !== emoji)].slice(0, 21);
+  localStorage.setItem("hd-recent-reactions", JSON.stringify(recentReactions));
+}
+
+function showReactionPopup(msgId) {
+  reactionPopup.dataset.msgId = msgId;
+
+  // Reset to quick row state
+  const fullPicker = document.getElementById("reaction-full-picker");
+  fullPicker.classList.add("hidden");
+  document.getElementById("reaction-search").value = "";
+
+  reactionPopup.classList.remove("hidden");
+  positionReactionPopup();
+}
+
+function positionReactionPopup() {
+  // Temporarily make visible off-screen to measure
+  reactionPopup.style.visibility = "hidden";
+  reactionPopup.style.left = "0px";
+  reactionPopup.style.top  = "0px";
+
+  requestAnimationFrame(() => {
+    const msgId = reactionPopup.dataset.msgId;
+    const msgEl = document.getElementById(`msg-wrap-${msgId}`);
+    const popW  = reactionPopup.offsetWidth  || 300;
+    const popH  = reactionPopup.offsetHeight || 56;
+
+    let anchorX = window.innerWidth  / 2;
+    let anchorY = window.innerHeight / 2;
+
+    if (msgEl) {
+      const r = msgEl.getBoundingClientRect();
+      anchorX = r.left + r.width  / 2;
+      anchorY = r.top;
+    }
+
+    // Horizontally: center over message, keep within screen
+    let left = anchorX - popW / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - popW - 8));
+
+    // Vertically: above the message if room, otherwise below
+    let top = anchorY - popH - 10;
+    if (top < 8) top = anchorY + (msgEl ? msgEl.offsetHeight : 0) + 10;
+    top = Math.max(8, Math.min(top, window.innerHeight - popH - 8));
+
+    reactionPopup.style.left = `${left}px`;
+    reactionPopup.style.top  = `${top}px`;
+    reactionPopup.style.visibility = "visible";
+  });
+}
+
+// "More" button toggles full picker
+document.getElementById("reaction-more-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const fullPicker = document.getElementById("reaction-full-picker");
+  const isOpen = !fullPicker.classList.contains("hidden");
+  fullPicker.classList.toggle("hidden", isOpen);
+  if (!isOpen) {
+    loadReactionCategory("recent");
+    document.getElementById("reaction-search").focus();
+    requestAnimationFrame(() => positionReactionPopup());
+  }
+});
+
+// Category tabs
+document.querySelectorAll(".rcat-btn").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".rcat-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("reaction-search").value = "";
+    loadReactionCategory(btn.dataset.rcat);
+  });
+});
+
+// Search
+document.getElementById("reaction-search").addEventListener("input", (e) => {
+  e.stopPropagation();
+  const q = e.target.value.trim();
+  if (!q) {
+    loadReactionCategory(document.querySelector(".rcat-btn.active")?.dataset.rcat || "recent");
+    return;
+  }
+  const all = Object.values(REACTION_EMOJI_DATA).flat();
+  renderReactionGrid(all);
+});
+
+function loadReactionCategory(cat) {
+  const emojis = cat === "recent" ? recentReactions : (REACTION_EMOJI_DATA[cat] || []);
+  renderReactionGrid(emojis);
+}
+
+function renderReactionGrid(emojis) {
+  const grid = document.getElementById("reaction-emoji-grid");
+  grid.innerHTML = "";
+  emojis.forEach(emoji => {
+    const btn = document.createElement("button");
+    btn.textContent = emoji;
+    btn.title = emoji;
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const msgId = reactionPopup.dataset.msgId;
+      if (msgId) {
+        await toggleReaction(msgId, emoji);
+        addRecentReaction(emoji);
+      }
+      reactionPopup.classList.add("hidden");
+      document.getElementById("reaction-full-picker").classList.add("hidden");
+    });
+    grid.appendChild(btn);
+  });
+}
+
+// Reposition if window resizes while open (debounced)
+let reactionResizeTimer = null;
+window.addEventListener("resize", () => {
+  if (reactionPopup.classList.contains("hidden")) return;
+  clearTimeout(reactionResizeTimer);
+  reactionResizeTimer = setTimeout(() => positionReactionPopup(), 120);
 });
 
 // =====================================
 // REPLY
 // =====================================
+
+let replyFocusTimer = null;
+let replyScrollTimer = null;
 
 function setReply(message) {
   replyingTo         = message;
@@ -483,25 +835,38 @@ function setReply(message) {
     : (message.type || "Message");
   replyText.textContent = preview;
 
+  // Clear any pending timers from a previous setReply call so they
+  // don't fire mid-transition and cause a second visual "jump"
+  clearTimeout(replyFocusTimer);
+  clearTimeout(replyScrollTimer);
+
+  const wasCollapsed = replyPreview.classList.contains("collapsed");
+
   // If already near bottom, keep pinned to bottom as the preview bar grows
   const wasNearBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight < 40;
 
-  replyPreview.classList.remove("collapsed");
+  if (wasCollapsed) {
+    replyPreview.classList.remove("collapsed");
+  }
+  // If it's already open (replying to a different message), just swap the
+  // text in place — no need to re-trigger the expand transition.
 
-  if (wasNearBottom) {
-    // Wait for the grid-row transition to finish, then re-pin to bottom
-    setTimeout(() => {
+  if (wasCollapsed && wasNearBottom) {
+    // Wait for the height transition to finish, then re-pin to bottom
+    replyScrollTimer = setTimeout(() => {
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }, 190);
+    }, 210);
   }
 
   // Defer focus so the keyboard-open viewport shift doesn't collide
   // with the reply preview's height transition (avoids double-jump on mobile)
-  setTimeout(() => messageInput.focus(), 80);
+  replyFocusTimer = setTimeout(() => messageInput.focus(), 80);
 }
 
 replyCancel.addEventListener("click", () => {
   replyingTo = null;
+  clearTimeout(replyFocusTimer);
+  clearTimeout(replyScrollTimer);
   replyPreview.classList.add("collapsed");
 });
 
@@ -581,6 +946,7 @@ async function sendMessage() {
   const payload = {
     id,
     sender:    currentUser.uid,
+    senderName: currentUser.username,
     type:      "text",
     text,
     timestamp: firebase.database.ServerValue.TIMESTAMP
@@ -676,9 +1042,16 @@ document.getElementById("mobile-back").addEventListener("click", closeMobileChat
 
 function closeMobileChat() {
   document.querySelector(".chat-panel").classList.remove("mobile-open");
-  activeChatId = null;
-  activeUserId = null;
+  activeChatId  = null;
+  activeUserId  = null;
+  activeGroupId = null;
   document.querySelectorAll(".chat-item").forEach(el => el.classList.remove("active"));
+  // Restore default header buttons (in case a group chat was open)
+  document.getElementById("group-members-btn").classList.add("hidden");
+  document.getElementById("call-btn").classList.remove("hidden");
+  document.getElementById("video-btn").classList.remove("hidden");
+  const dot = document.getElementById("chat-online-dot");
+  if (dot) dot.style.display = "";
 }
 
 // =====================================
