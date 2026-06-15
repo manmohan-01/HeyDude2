@@ -174,7 +174,7 @@ loginForm.addEventListener("submit", async (e) => {
 // LOGOUT
 // ======================
 
-logoutBtn.addEventListener("click", async () => {
+async function performLogout() {
   try {
     if (currentUser) await setUserOffline(currentUser.uid);
     await auth.signOut();
@@ -185,7 +185,9 @@ logoutBtn.addEventListener("click", async () => {
   } catch (error) {
     console.error("Logout error:", error);
   }
-});
+}
+
+logoutBtn.addEventListener("click", performLogout);
 
 // ======================
 // AUTH STATE LISTENER
@@ -217,11 +219,18 @@ auth.onAuthStateChanged(async (user) => {
     currentUser = { uid: user.uid, ...profile };
     setUserOnline(user.uid);
 
-    // Sidebar profile
-    document.getElementById("my-name").textContent           = profile.username;
-    document.getElementById("my-status").textContent         = "● Online";
-    document.getElementById("my-avatar").textContent         = getInitial(profile.username);
-    document.getElementById("my-avatar").style.background    = avatarColor(profile.username);
+    // Profile — sidebar + rail avatar
+    document.getElementById("my-name").textContent     = profile.username;
+    document.getElementById("my-status").textContent   = "Online";
+
+    const initial = getInitial(profile.username);
+    const color   = avatarColor(profile.username);
+
+    const sidebarAvatar = document.getElementById("my-avatar-sidebar");
+    const railAvatar    = document.getElementById("rail-avatar");
+
+    if (sidebarAvatar) { sidebarAvatar.textContent = initial; sidebarAvatar.style.background = color; }
+    if (railAvatar)    { railAvatar.textContent    = initial; railAvatar.style.background    = color; }
 
     authScreen.classList.remove("active");
     appScreen.classList.add("active");
