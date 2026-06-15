@@ -136,6 +136,7 @@ async function sendGifFileAsDataUrl(file) {
     await messagesRef.child(activeChatId).child(msgId).set({
       id:        msgId,
       sender:    currentUser.uid,
+      senderName: currentUser.username,
       type:      "gif",
       url:       dataUrl,
       timestamp: firebase.database.ServerValue.TIMESTAMP
@@ -207,16 +208,24 @@ chatContainerEl.addEventListener("drop", (e) => {
 });
 
 // =====================================
-// GIF PICKER  (Tenor v2 — public API key)
+// GIF PICKER  (GIPHY — public beta API key)
 // =====================================
 
-// Tenor's documented public test key (LIVDSRZULELA) — generous rate limits, no signup
-const TENOR_KEY = "LIVDSRZULELA";
-const TENOR_CLIENT = "heydude-chat";
+// GIPHY's documented public beta key — works without signup, rate-limited but reliable
+const GIPHY_KEY = "djhhrHzujtfoV9T4TIHpfyJ0MlnHn0ll";
+
+let gifJustToggled = false;
 
 gifBtn.addEventListener("click", (e) => {
+  e.preventDefault();
   e.stopPropagation();
+
+  if (gifJustToggled) return;
+  gifJustToggled = true;
+  setTimeout(() => { gifJustToggled = false; }, 50);
+
   document.getElementById("emoji-picker").classList.add("hidden");
+  document.getElementById("emoji-btn").classList.remove("active");
 
   const willOpen = gifPicker.classList.contains("hidden");
   gifPicker.classList.toggle("hidden");
@@ -247,11 +256,11 @@ gifSearch.addEventListener("input", () => {
 async function loadTrendingGifs() {
   gifGrid.innerHTML = `<div class="gif-loading">Loading trending GIFs…</div>`;
   try {
-    const url = `https://tenor.googleapis.com/v2/featured?key=${TENOR_KEY}&client_key=${TENOR_CLIENT}&limit=24&media_filter=gif,tinygif&contentfilter=medium`;
+    const url = `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_KEY}&limit=24&rating=pg-13`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { results } = await res.json();
-    renderGifs(results || []);
+    const { data } = await res.json();
+    renderGifs(data || []);
   } catch (err) {
     console.error("GIF trending error:", err);
     gifGrid.innerHTML = `<div class="gif-placeholder">Couldn't load GIFs.<br>Check your connection.</div>`;
@@ -261,11 +270,11 @@ async function loadTrendingGifs() {
 async function searchGifs(query) {
   gifGrid.innerHTML = `<div class="gif-loading">Searching "${escapeHTML(query)}"…</div>`;
   try {
-    const url = `https://tenor.googleapis.com/v2/search?key=${TENOR_KEY}&client_key=${TENOR_CLIENT}&q=${encodeURIComponent(query)}&limit=24&media_filter=gif,tinygif&contentfilter=medium`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(query)}&limit=24&rating=pg-13`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { results } = await res.json();
-    renderGifs(results || []);
+    const { data } = await res.json();
+    renderGifs(data || []);
   } catch (err) {
     console.error("GIF search error:", err);
     gifGrid.innerHTML = `<div class="gif-placeholder">Search failed. Try again.</div>`;
@@ -281,9 +290,9 @@ function renderGifs(results) {
   }
 
   results.forEach(gif => {
-    const formats = gif.media_formats || {};
-    const preview = formats.tinygif?.url || formats.gif?.url;
-    const full    = formats.gif?.url || formats.tinygif?.url;
+    const images  = gif.images || {};
+    const preview = images.fixed_height_small?.url || images.fixed_height?.url;
+    const full    = images.original?.url || images.fixed_height?.url;
     if (!preview || !full) return;
 
     const div = document.createElement("div");
@@ -292,7 +301,7 @@ function renderGifs(results) {
     const img   = document.createElement("img");
     img.src     = preview;
     img.loading = "lazy";
-    img.alt     = gif.content_description || "GIF";
+    img.alt     = gif.title || "GIF";
 
     img.onclick = async () => {
       gifPicker.classList.add("hidden");
@@ -313,6 +322,7 @@ async function sendGifMessage(url) {
   await messagesRef.child(activeChatId).child(id).set({
     id,
     sender:    currentUser.uid,
+    senderName: currentUser.username,
     type:      "gif",
     url,
     timestamp: firebase.database.ServerValue.TIMESTAMP
@@ -383,6 +393,7 @@ async function uploadMedia(file, type) {
     const payload = {
       id:        msgId,
       sender:    currentUser.uid,
+      senderName: currentUser.username,
       type:      finalType,
       url:       dataUrl,
       timestamp: firebase.database.ServerValue.TIMESTAMP
@@ -517,10 +528,12 @@ function removeProgressBubble(id) {
 function positionFloatingPanel(panel) {
   if (window.innerWidth <= 768) {
     // Mobile: bottom sheet — CSS handles positioning
-    panel.style.left = "";
-    panel.style.bottom = "";
-    panel.style.top = "";
-    panel.style.width = "";
+    if (panel.style.left !== "" || panel.style.bottom !== "" || panel.style.top !== "" || panel.style.width !== "") {
+      panel.style.left = "";
+      panel.style.bottom = "";
+      panel.style.top = "";
+      panel.style.width = "";
+    }
     return;
   }
 
@@ -532,11 +545,18 @@ function positionFloatingPanel(panel) {
   if (left + panelWidth > window.innerWidth - 12) {
     left = window.innerWidth - panelWidth - 12;
   }
+  left = Math.max(12, left);
 
-  panel.style.left   = `${Math.max(12, left)}px`;
-  panel.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-  panel.style.top    = "auto";
-  panel.style.width  = `${panelWidth}px`;
+  const newLeft   = `${left}px`;
+  const newBottom = `${window.innerHeight - rect.top + 8}px`;
+  const newWidth  = `${panelWidth}px`;
+
+  // Only write styles if something actually changed — avoids
+  // unnecessary reflow/repaint cycles that can cause flicker.
+  if (panel.style.left !== newLeft)     panel.style.left   = newLeft;
+  if (panel.style.bottom !== newBottom) panel.style.bottom = newBottom;
+  if (panel.style.top !== "auto")       panel.style.top    = "auto";
+  if (panel.style.width !== newWidth)   panel.style.width  = newWidth;
 }
 
 // =====================================
@@ -565,9 +585,13 @@ document.addEventListener("click", (e) => {
   }
 });
 
-// Reposition floating panels on resize/orientation change
+// Reposition floating panels on resize/orientation change (debounced)
+let pickerResizeTimer = null;
 window.addEventListener("resize", () => {
-  const emojiPicker = document.getElementById("emoji-picker");
-  if (!emojiPicker.classList.contains("hidden")) positionFloatingPanel(emojiPicker);
-  if (!gifPicker.classList.contains("hidden"))   positionFloatingPanel(gifPicker);
+  clearTimeout(pickerResizeTimer);
+  pickerResizeTimer = setTimeout(() => {
+    const emojiPicker = document.getElementById("emoji-picker");
+    if (!emojiPicker.classList.contains("hidden")) positionFloatingPanel(emojiPicker);
+    if (!gifPicker.classList.contains("hidden"))   positionFloatingPanel(gifPicker);
+  }, 120);
 });
