@@ -86,8 +86,18 @@ let activeCat    = "recent";
 // TOGGLE PICKER
 // =====================================
 
+let emojiJustToggled = false;
+
 emojiBtn.addEventListener("click", (e) => {
+  e.preventDefault();
   e.stopPropagation();
+
+  // Guard against a duplicate click event firing in the same tick
+  // (can happen on touch devices when click follows a touch interaction)
+  if (emojiJustToggled) return;
+  emojiJustToggled = true;
+  setTimeout(() => { emojiJustToggled = false; }, 50);
+
   const gifPickerEl = document.getElementById("gif-picker");
   gifPickerEl.classList.add("hidden");
   document.getElementById("gif-btn").classList.remove("active");
