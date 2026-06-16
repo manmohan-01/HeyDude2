@@ -240,14 +240,20 @@ function loadGroupList() {
 
   groupsRef.on("value", snapshot => {
     listEl.innerHTML = "";
-    const groups = snapshot.val();
-
-    if (!groups) {
-      emptyEl.classList.remove("hidden");
-      return;
-    }
+    const groups = snapshot.val() || {};
 
     const myGroups = Object.values(groups).filter(g => g.members && g.members[currentUser.uid]);
+
+    // If the currently open group chat no longer includes this user
+    // (removed by an admin, or the group was deleted), close it.
+    if (activeGroupId && activeChatId === `group_${activeGroupId}`) {
+      const stillMember = myGroups.some(g => g.id === activeGroupId);
+      if (!stillMember) {
+        showToast("You're no longer in this group");
+        if (typeof closeActiveChat === "function") closeActiveChat();
+        if (typeof closeMobileChat === "function") closeMobileChat();
+      }
+    }
 
     if (!myGroups.length) {
       emptyEl.classList.remove("hidden");
@@ -332,6 +338,7 @@ function openGroupChat(groupId, groupName, members) {
   if (activeChatId) {
     messagesRef.child(activeChatId).off();
     typingRef.child(activeChatId).off();
+    if (activeUserId) readReceiptsRef.child(activeChatId).child(activeUserId).off();
     Object.values(reactionListeners).forEach(off => off());
     for (const k in reactionListeners) delete reactionListeners[k];
   }
@@ -339,6 +346,7 @@ function openGroupChat(groupId, groupName, members) {
   activeChatId  = `group_${groupId}`;
   activeUserId  = null;
   activeGroupId = groupId;
+  otherUserLastRead = 0;
   replyingTo    = null;
   replyPreview.classList.add("collapsed");
 
@@ -408,7 +416,8 @@ async function loadMembersPanel(groupId) {
   const memberCount = Object.keys(group.members || {}).length;
   document.getElementById("members-panel-count").textContent = `${memberCount} member${memberCount !== 1 ? "s" : ""}`;
 
-  const listEl = document.getElementById("members-list");
+  const isAdmin = group.createdBy === currentUser.uid;
+  const listEl  = document.getElementById("members-list");
   listEl.innerHTML = "";
 
   for (const uid of Object.keys(group.members || {})) {
@@ -421,6 +430,18 @@ async function loadMembersPanel(groupId) {
 
     const div = document.createElement("div");
     div.className = "member-row";
+
+    let rightHtml = "";
+    if (isCreator) {
+      rightHtml = '<span class="member-badge">Admin</span>';
+    } else if (isAdmin) {
+      // Admin can remove any non-admin member
+      rightHtml = `
+        <button class="remove-member-btn" title="Remove from group" data-uid="${uid}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>`;
+    }
+
     div.innerHTML = `
       <div class="member-avatar" style="background:${avatarColor(user.username)}">${getInitial(user.username)}</div>
       <div class="member-info">
@@ -429,20 +450,142 @@ async function loadMembersPanel(groupId) {
           ${user.online ? "● Online" : "○ Offline"}
         </span>
       </div>
-      ${isCreator ? '<span class="member-badge">Admin</span>' : ""}
+      ${rightHtml}
     `;
+
+    const removeBtn = div.querySelector(".remove-member-btn");
+    if (removeBtn) {
+      removeBtn.addEventListener("click", () => removeMemberFromGroup(groupId, uid, user.username));
+    }
+
     listEl.appendChild(div);
   }
 
-  // Add-member section, admin only
-  const addSection = document.getElementById("add-member-section");
-  if (group.createdBy === currentUser.uid) {
+  const addSection    = document.getElementById("add-member-section");
+  const deleteSection = document.getElementById("delete-group-section");
+  const leaveSection  = document.getElementById("leave-group-section");
+
+  if (isAdmin) {
     addSection.classList.remove("hidden");
     setupAddMemberSearch(groupId, group.members || {});
+
+    deleteSection.classList.remove("hidden");
+    leaveSection.classList.add("hidden");
   } else {
     addSection.classList.add("hidden");
+    deleteSection.classList.add("hidden");
+    leaveSection.classList.remove("hidden");
   }
 }
+
+// =====================================
+// REMOVE MEMBER FROM GROUP (admin only)
+// =====================================
+
+async function removeMemberFromGroup(groupId, uid, username) {
+  showConfirmDialog({
+    title: "Remove member?",
+    message: `Remove <strong>${escapeHTML(username)}</strong> from this group?`,
+    confirmLabel: "Remove",
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await groupsRef.child(groupId).child("members").child(uid).remove();
+
+        const snap = await groupsRef.child(groupId).once("value");
+        const group = snap.val();
+        const newCount = group && group.members ? Object.keys(group.members).length : 0;
+        await groupsRef.child(groupId).update({ memberCount: newCount });
+
+        showToast(`${username} removed from group`);
+        loadMembersPanel(groupId);
+      } catch (err) {
+        console.error("Remove member error:", err);
+        showToast("Failed to remove member");
+      }
+    }
+  });
+}
+
+// =====================================
+// DELETE GROUP (admin/creator only)
+// =====================================
+
+document.getElementById("delete-group-btn").addEventListener("click", () => {
+  if (!activeGroupId) return;
+
+  showConfirmDialog({
+    title: "Delete group?",
+    message: "This will permanently delete the group and all its messages for everyone. This can't be undone.",
+    confirmLabel: "Delete",
+    danger: true,
+    onConfirm: async () => {
+      const groupId = activeGroupId;
+      try {
+        await Promise.all([
+          groupsRef.child(groupId).remove(),
+          messagesRef.child(`group_${groupId}`).remove()
+        ]);
+
+        showToast("Group deleted");
+        closeMembersPanel();
+
+        const item = document.getElementById(`group-item-${groupId}`);
+        if (item) item.remove();
+
+        if (activeChatId === `group_${groupId}`) {
+          if (typeof closeActiveChat === "function") closeActiveChat();
+          if (typeof closeMobileChat === "function") closeMobileChat();
+        }
+      } catch (err) {
+        console.error("Delete group error:", err);
+        showToast("Failed to delete group");
+      }
+    }
+  });
+});
+
+// =====================================
+// LEAVE GROUP (non-admin members)
+// =====================================
+
+document.getElementById("leave-group-btn").addEventListener("click", () => {
+  if (!activeGroupId) return;
+  const groupId = activeGroupId;
+
+  showConfirmDialog({
+    title: "Leave group?",
+    message: "You won't be able to see messages in this group unless someone adds you back.",
+    confirmLabel: "Leave",
+    danger: true,
+    onConfirm: async () => {
+      try {
+        await groupsRef.child(groupId).child("members").child(currentUser.uid).remove();
+
+        const snap = await groupsRef.child(groupId).once("value");
+        const group = snap.val();
+        if (group) {
+          const newCount = group.members ? Object.keys(group.members).length : 0;
+          await groupsRef.child(groupId).update({ memberCount: newCount });
+        }
+
+        showToast("You left the group");
+        closeMembersPanel();
+
+        const item = document.getElementById(`group-item-${groupId}`);
+        if (item) item.remove();
+
+        if (activeChatId === `group_${groupId}`) {
+          if (typeof closeActiveChat === "function") closeActiveChat();
+          if (typeof closeMobileChat === "function") closeMobileChat();
+        }
+      } catch (err) {
+        console.error("Leave group error:", err);
+        showToast("Failed to leave group");
+      }
+    }
+  });
+});
 
 // =====================================
 // ADD MEMBER TO EXISTING GROUP
