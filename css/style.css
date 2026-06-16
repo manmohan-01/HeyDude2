@@ -84,6 +84,8 @@ html, body {
   background: var(--bg);
   color: var(--text);
   height: 100%;
+  width: 100%;
+  max-width: 100vw;
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
 }
@@ -107,7 +109,7 @@ button { font-family: inherit; }
    SCREENS
 ========================= */
 
-.screen { width: 100%; height: calc(var(--vh, 1vh) * 100); display: none; }
+.screen { width: 100%; max-width: 100vw; height: calc(var(--vh, 1vh) * 100); display: none; overflow-x: hidden; }
 .screen.active { display: flex; }
 
 /* =========================
@@ -227,6 +229,7 @@ button { font-family: inherit; }
   position: relative; z-index: 1;
   animation: cardIn 0.4s var(--bounce) both;
   align-self: center;
+  box-sizing: border-box;
 }
 
 @keyframes cardIn {
@@ -242,6 +245,8 @@ button { font-family: inherit; }
   flex: 1;
   min-width: 0;
   max-width: 640px;
+  width: 100%;
+  box-sizing: border-box;
   animation: showcaseIn 0.5s 0.05s var(--bounce) both;
 }
 
@@ -330,6 +335,7 @@ button { font-family: inherit; }
   border-radius: 20px;
   box-shadow: var(--shadow);
   max-width: 360px;
+  width: 100%;
   margin-bottom: 32px;
   overflow: hidden;
   animation: phoneFloat 6s ease-in-out infinite;
@@ -431,7 +437,9 @@ button { font-family: inherit; }
   grid-template-columns: repeat(3, 1fr);
   gap: 14px;
   margin-bottom: 28px;
+  width: 100%;
 }
+.feature-grid > * { min-width: 0; }
 
 .feature-card {
   background: var(--card);
@@ -789,6 +797,20 @@ button { font-family: inherit; }
 }
 .add-btn:hover { background: var(--primary-dark); transform: scale(1.04); }
 .add-btn:disabled { background: var(--text-muted); cursor: default; transform: none; }
+.add-btn.pending { background: var(--text-muted); color: var(--card); }
+
+/* Existing friend in search results — whole row opens the chat */
+.search-user-friend { cursor: pointer; }
+.search-user-friend:hover { background: var(--overlay-06); }
+
+.message-btn {
+  background: var(--primary-glow); border: 1px solid rgba(255,71,87,0.25);
+  border-radius: 50%; color: var(--primary); cursor: pointer;
+  width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: all var(--transition);
+}
+.message-btn svg { width: 17px; height: 17px; }
+.message-btn:hover { background: var(--primary); color: white; transform: scale(1.06); }
 
 .online-text { color: var(--green); }
 .offline-text { color: var(--text-light); }
@@ -953,7 +975,7 @@ button { font-family: inherit; }
    CHAT CONTAINER
 ========================= */
 
-.chat-container { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-height: 0; position: relative; }
+.chat-container { display: flex; flex-direction: column; flex: 1; overflow: hidden; min-height: 0; min-width: 0; max-width: 100%; position: relative; }
 
 .load-more-wrap { display: flex; justify-content: center; padding: 12px; }
 .load-more-btn {
@@ -968,12 +990,12 @@ button { font-family: inherit; }
 ========================= */
 
 .messages {
-  flex: 1; overflow-y: auto; padding: 16px 20px;
+  flex: 1; overflow-y: auto; overflow-x: hidden; padding: 16px 20px;
   display: flex; flex-direction: column; gap: 4px;
   overscroll-behavior: contain;
   contain: layout style;
   -webkit-overflow-scrolling: touch;
-  min-height: 0;
+  min-height: 0; min-width: 0; max-width: 100%;
 }
 
 .messages::-webkit-scrollbar { width: 5px; }
@@ -990,6 +1012,7 @@ button { font-family: inherit; }
 /* Message wrapper — GPU-promoted, animates from correct corner */
 .message-wrap {
   display: flex; flex-direction: column; max-width: 70%; position: relative;
+  box-sizing: border-box;
   transform: translateZ(0);
   backface-visibility: hidden;
 }
@@ -1113,7 +1136,7 @@ button { font-family: inherit; }
 
 /* Timestamps */
 .msg-time { display: block; margin-top: 4px; opacity: 0.55; font-size: 11px; padding: 0 4px; display: flex; align-items: center; gap: 4px; }
-.msg-tick { display: flex; align-items: center; }
+.msg-tick { display: flex; align-items: center; transition: color 0.2s ease; }
 .msg-tick svg { width: 13px; height: 13px; }
 .msg-tick.read { color: #4fc3f7; opacity: 1; }
 
@@ -1374,19 +1397,24 @@ button { font-family: inherit; }
 .gif-search-input:focus { outline: none; }
 
 .gif-grid {
-  flex: 1; overflow-y: auto; padding: 0 8px 8px; display: grid;
-  grid-template-columns: repeat(2, 1fr); gap: 6px; align-content: start;
+  flex: 1; overflow-y: auto; padding: 0 8px 8px;
+  column-count: 2; column-gap: 6px;
 }
 .gif-grid::-webkit-scrollbar { width: 3px; }
 .gif-grid::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
 .gif-placeholder, .gif-loading {
-  grid-column: 1 / -1; color: var(--text-light); font-size: 13px; text-align: center; padding: 40px 12px; line-height: 1.6;
+  column-span: all; color: var(--text-light); font-size: 13px; text-align: center; padding: 40px 12px; line-height: 1.6;
 }
 
-.gif-item { border-radius: 10px; overflow: hidden; cursor: pointer; transition: transform var(--transition); aspect-ratio: 16/9; background: var(--bg); }
+.gif-item {
+  border-radius: 10px; overflow: hidden; cursor: pointer;
+  transition: transform var(--transition); background: var(--bg);
+  margin-bottom: 6px; break-inside: avoid;
+  display: block; width: 100%;
+}
 .gif-item:hover { transform: scale(1.03); }
-.gif-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.gif-item img { width: 100%; height: auto; display: block; }
 
 .gif-footer {
   text-align: center; font-size: 10px; color: var(--text-muted);
@@ -1847,6 +1875,14 @@ button { font-family: inherit; }
   .profile-area { padding: 10px 12px; }
   .panel-tabs { padding: 10px 12px 6px; gap: 4px; }
   .panel-tab { padding: 6px 10px; font-size: 12px; }
+
+  /* Prevent showcase cards/stats from overflowing very narrow screens */
+  .feature-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .feature-card { padding: 12px; min-width: 0; }
+  .feature-card h4 { font-size: 12.5px; }
+  .feature-card p { font-size: 11px; }
+  .stats-strip { gap: 16px; }
+  .stat-num { font-size: 20px; }
 }
 
 /* Landscape mobile — shrink vertical paddings */
@@ -2025,9 +2061,32 @@ button { font-family: inherit; }
   padding: 3px 8px; border-radius: 10px; flex-shrink: 0;
 }
 
+.remove-member-btn {
+  background: none; border: none; cursor: pointer; padding: 6px;
+  border-radius: 50%; color: var(--text-light); flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+}
+.remove-member-btn svg { width: 16px; height: 16px; }
+.remove-member-btn:hover { background: var(--primary-glow); color: var(--primary); }
+
 .add-member-section {
   border-top: 1px solid var(--border); padding-top: 14px; margin-top: 4px;
 }
+
+.delete-group-section {
+  border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px;
+}
+
+.danger-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; background: var(--primary-glow); color: var(--primary);
+  border: 1px solid rgba(255,71,87,0.3); border-radius: 12px;
+  padding: 11px; font-size: 14px; font-weight: 700; font-family: inherit;
+  cursor: pointer; transition: all var(--transition);
+}
+.danger-btn:hover { background: var(--primary); color: white; }
+.danger-btn svg { width: 17px; height: 17px; }
 
 .group-member-item .add-btn {
   background: var(--primary); color: white; border: none;
