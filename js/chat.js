@@ -14,6 +14,8 @@ let contextTarget = null;
 const renderedMsgIds = new Set();
 // Track reaction listeners so we can detach them on chat switch
 const reactionListeners = {};
+// Latest "lastRead" timestamp the other person has for the open chat
+let otherUserLastRead = 0;
 
 const chatList           = document.getElementById("chat-list");
 const messagesContainer  = document.getElementById("messages");
@@ -255,6 +257,7 @@ function closeActiveChat() {
   if (activeChatId) {
     messagesRef.child(activeChatId).off();
     typingRef.child(activeChatId).off();
+    if (activeUserId) readReceiptsRef.child(activeChatId).child(activeUserId).off();
     Object.values(reactionListeners).forEach(off => off());
     for (const k in reactionListeners) delete reactionListeners[k];
   }
@@ -262,6 +265,7 @@ function closeActiveChat() {
   activeChatId  = null;
   activeUserId  = null;
   activeGroupId = null;
+  otherUserLastRead = 0;
   renderedMsgIds.clear();
   lastRenderedDate = null;
 
@@ -314,6 +318,7 @@ function openChat(chatId, friend) {
   if (activeChatId) {
     messagesRef.child(activeChatId).off();
     typingRef.child(activeChatId).off();
+    if (activeUserId) readReceiptsRef.child(activeChatId).child(activeUserId).off();
     // Detach old reaction listeners
     Object.values(reactionListeners).forEach(off => off());
     for (const k in reactionListeners) delete reactionListeners[k];
@@ -350,6 +355,12 @@ function openChat(chatId, friend) {
   listenMessages(chatId);
   listenTyping(chatId);
 
+  // Read receipts: tell the other person we've read up to now,
+  // and watch their lastRead so our sent ticks update live.
+  otherUserLastRead = 0;
+  markChatAsRead(chatId);
+  listenReadReceipts(chatId, friend.uid);
+
   if (window.innerWidth <= 768) {
     document.querySelector(".chat-panel").classList.add("mobile-open");
   }
@@ -358,8 +369,48 @@ function openChat(chatId, friend) {
 }
 
 // =====================================
-// USER STATUS
+// READ RECEIPTS
 // =====================================
+
+// Mark the currently open chat as read by the current user (writes our
+// own lastRead timestamp). Skipped for group chats (handled separately).
+function markChatAsRead(chatId) {
+  if (!currentUser || !chatId || chatId.startsWith("group_")) return;
+  readReceiptsRef.child(chatId).child(currentUser.uid).set(firebase.database.ServerValue.TIMESTAMP);
+}
+
+// Listen for the other person's lastRead timestamp in this chat and
+// update tick marks on our sent messages whenever it changes.
+function listenReadReceipts(chatId, otherUid) {
+  if (!otherUid) return;
+  readReceiptsRef.child(chatId).child(otherUid).on("value", snapshot => {
+    otherUserLastRead = snapshot.val() || 0;
+    updateAllTicks();
+  });
+}
+
+// Re-evaluate every sent message's tick (single check vs double check)
+// based on the latest known otherUserLastRead value.
+function updateAllTicks() {
+  document.querySelectorAll(".message-wrap.sent .msg-tick").forEach(tickEl => {
+    const wrap = tickEl.closest(".message-wrap");
+    if (!wrap) return;
+    const ts = parseInt(wrap.dataset.timestamp || "0", 10);
+    const isRead = ts > 0 && otherUserLastRead >= ts;
+    tickEl.classList.toggle("read", isRead);
+    const use = tickEl.querySelector("use");
+    if (use) use.setAttribute("href", isRead ? "#icon-check-double" : "#icon-check");
+    tickEl.title = isRead ? "Read" : "Sent";
+  });
+}
+
+// Mark chat as read when the tab/window regains focus or visibility,
+// so receipts update even if the user just switches back to the app.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && activeChatId && !activeChatId.startsWith("group_")) {
+    markChatAsRead(activeChatId);
+  }
+});
 
 function updateUserStatus(uid) {
   usersRef.child(uid).on("value", snapshot => {
@@ -413,6 +464,12 @@ function listenMessages(chatId) {
         messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: "smooth" });
       });
     }
+
+    // If this is a new incoming message and we're actively viewing this
+    // chat, mark it as read right away so the sender's tick updates live.
+    if (!mine && !document.hidden && activeChatId === chatId) {
+      markChatAsRead(chatId);
+    }
   });
 }
 
@@ -445,6 +502,7 @@ function buildMessageNode(message) {
   wrap.className = `message-wrap ${mine ? "sent" : "received"}`;
   wrap.id        = `msg-wrap-${message.id}`;
   wrap.style.willChange = "transform, opacity";
+  if (mine && message.timestamp) wrap.dataset.timestamp = message.timestamp;
 
   // Sender name (group chats only, received messages)
   if (!mine && message.senderName && activeChatId?.startsWith("group_")) {
@@ -523,7 +581,16 @@ function buildMessageNode(message) {
   // Timestamp + tick
   const time     = document.createElement("small");
   time.className = "msg-time";
-  time.innerHTML = `${formatTime(message.timestamp)}${mine ? ' <span class="msg-tick read"><svg><use href="#icon-check-double"/></svg></span>' : ""}`;
+
+  if (mine) {
+    const isGroup = activeChatId?.startsWith("group_");
+    const isRead  = !isGroup && message.timestamp && otherUserLastRead >= message.timestamp;
+    const tickIcon = isRead ? "icon-check-double" : "icon-check";
+    time.innerHTML = `${formatTime(message.timestamp)} <span class="msg-tick${isRead ? " read" : ""}" title="${isRead ? "Read" : "Sent"}"><svg><use href="#${tickIcon}"/></svg></span>`;
+  } else {
+    time.innerHTML = formatTime(message.timestamp);
+  }
+
   bubble.appendChild(time);
 
   // Context menu
