@@ -52,10 +52,43 @@ async function performSearch() {
       return;
     }
 
+    // Pre-fetch this user's chats (friends) and outgoing pending requests
+    // so each search result can show the correct state.
+    const [chatsSnap, requestsSnap] = await Promise.all([
+      chatsRef.once("value"),
+      requestsRef.orderByChild("from").equalTo(currentUser.uid).once("value")
+    ]);
+
+    const chats = chatsSnap.val() || {};
+    const friendIds = new Set();
+    for (const chat of Object.values(chats)) {
+      if (chat.members && chat.members[currentUser.uid]) {
+        const otherId = Object.keys(chat.members).find(id => id !== currentUser.uid);
+        if (otherId) friendIds.add(otherId);
+      }
+    }
+
+    const outgoing = requestsSnap.val() || {};
+    const pendingIds = new Set(
+      Object.values(outgoing)
+        .filter(r => r.status === "pending")
+        .map(r => r.to)
+    );
+
     let found = 0;
     for (const user of Object.values(users)) {
       if (!currentUser || user.uid === currentUser.uid) continue;
-      renderSearchUser(user);
+
+      let state = "add";
+      let chatId = null;
+      if (friendIds.has(user.uid)) {
+        state  = "friend";
+        chatId = generateChatId(currentUser.uid, user.uid);
+      } else if (pendingIds.has(user.uid)) {
+        state = "pending";
+      }
+
+      renderSearchUser(user, state, chatId);
       found++;
     }
 
@@ -70,11 +103,22 @@ async function performSearch() {
 
 // ======================
 // RENDER SEARCH RESULT
+// state: "friend" | "pending" | "add"
 // ======================
 
-function renderSearchUser(user) {
+function renderSearchUser(user, state = "add", chatId = null) {
   const div = document.createElement("div");
   div.className = "search-user";
+  if (state === "friend") div.classList.add("search-user-friend");
+
+  let actionHtml;
+  if (state === "friend") {
+    actionHtml = `<button class="message-btn" title="Message"><svg><use href="#icon-message-circle"/></svg></button>`;
+  } else if (state === "pending") {
+    actionHtml = `<button class="add-btn pending" disabled>Pending</button>`;
+  } else {
+    actionHtml = `<button class="add-btn" onclick="sendFriendRequest('${user.uid}', this)">Add</button>`;
+  }
 
   div.innerHTML = `
     <div class="search-user-inner">
@@ -89,9 +133,24 @@ function renderSearchUser(user) {
           </small>
         </div>
       </div>
-      <button class="add-btn" onclick="sendFriendRequest('${user.uid}', this)">Add</button>
+      ${actionHtml}
     </div>
   `;
+
+  // Friends: clicking the row (or the message button) opens the chat directly
+  if (state === "friend" && chatId) {
+    div.addEventListener("click", (e) => {
+      // Avoid double-handling if the inner button itself was clicked
+      e.stopPropagation();
+      openChat(chatId, user);
+      searchInput.value = "";
+      searchResults.innerHTML = "";
+      searchClear.classList.add("hidden");
+      if (window.innerWidth <= 768) {
+        document.querySelector(".chat-panel")?.classList.add("mobile-open");
+      }
+    });
+  }
 
   searchResults.appendChild(div);
 }
@@ -104,7 +163,8 @@ async function sendFriendRequest(targetUid, btn) {
   if (!currentUser) return;
 
   btn.disabled    = true;
-  btn.textContent = "Sent";
+  btn.textContent = "Pending";
+  btn.classList.add("pending");
 
   try {
     const alreadyFriends = await areFriends(currentUser.uid, targetUid);
