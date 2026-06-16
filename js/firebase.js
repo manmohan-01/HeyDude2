@@ -36,6 +36,7 @@ const requestsRef = db.ref("friendRequests");
 const typingRef   = db.ref("typing");
 const reactionsRef = db.ref("reactions");
 const groupsRef   = db.ref("groups");
+const readReceiptsRef = db.ref("readReceipts");
 
 // Current User (global)
 let currentUser = null;
